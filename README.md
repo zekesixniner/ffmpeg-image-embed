@@ -18,8 +18,10 @@ H.264/H.265-video som helst.
   därefter, så bitdjupet bevaras genom overlay-steget istället för att tystas
   ner till 8-bit i onödan
 - Varnar om bildens position skulle hamna helt eller delvis utanför videoramen
-- Kör ffmpeg med `hevc_nvenc` (NVIDIA GPU), `-cq 15` (visuellt lossless) som
-  standard
+- Avkodar via NVDEC (GPU) och kodar via `hevc_nvenc` (GPU), `-cq 15`
+  (visuellt lossless) som standard — bara overlay-blandningen sker på CPU
+  (`--cpu-decode` finns om du behöver avkoda på CPU istället, t.ex. vid
+  felsökning)
 - Skriver ut ffmpegs egen statusrad rakt av — ingen egen progress-parsning
 
 ## Krav
@@ -138,10 +140,26 @@ pixelformat via `ffprobe` och väljer filterkedja därefter:
 input format: p010le` för 10-bit-källor — en känd, olöst begränsning i
 ffmpeg sedan minst 2019/2020 (bekräftat mot ffmpeg-devel-mejllistan, samt
 empiriskt mot både fristående ffmpeg-nightlies och OVRLEYs bundlade
-ffmpeg, augusti 2026). Därför använder skriptet CPU-`overlay` +
-GPU-`hevc_nvenc`-encoding (hybrid), inte fullt GPU-overlay. `scale_cuda`
-(ren skalning) fick en liknande bugfix för >8-bit-format vid ett
-tillfälle, men `overlay_cuda` specifikt har aldrig fått motsvarande stöd.
+ffmpeg, augusti 2026). `scale_cuda` (ren skalning) fick en liknande
+bugfix för >8-bit-format vid ett tillfälle, men `overlay_cuda` specifikt
+har aldrig fått motsvarande stöd.
+
+### Varför NVDEC-avkodning ändå inte påverkar kvaliteten
+
+Skriptet avkodar videon med NVDEC (GPU) istället för mjukvara (CPU), men
+utför själva overlay-blandningen på CPU precis som innan — bara
+avkodningssteget flyttas. Detta är säkert kvalitetsmässigt eftersom
+avkodning är deterministisk: att avkoda en HEVC-bitström innebär bara att
+återskapa de pixelvärden som redan är kodade i filen enligt en fastlåst
+specifikation (IDCT, motion compensation, deblocking). Det finns inget
+kreativt tolkningsutrymme som vid encoding, där olika encoders kan ge
+olika resultat vid samma bitrate. NVDEC och ffmpegs mjukvaruavkodare
+följer samma spec och producerar samma pixeldata. `hwdownload` hämtar ner
+de NVDEC-avkodade frames till system-RAM i exakt samma pixelformat
+(`yuv420p10le`/`yuv420p`) som CPU-overlay-filtret redan tog emot innan,
+så resten av kedjan är oförändrad — bara CPU-belastningen minskar
+kraftigt, vilket är särskilt märkbart på 8K 10-bit-material där
+mjukvaruavkodning annars är den tyngsta delen av hela pipelinen.
 
 ## Licens
 

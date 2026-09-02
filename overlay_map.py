@@ -4,7 +4,11 @@ overlay_map.py
 ===============
 Bäddar in en bild (t.ex. en kartbild) i en video vid valfri position,
 med automatisk bitdjups-detektering (8-bit/10-bit) för att undvika
-onödig kvalitetsförlust. Använder GPU-accelererad HEVC-encoding (NVENC).
+onödig kvalitetsförlust. Avkodning sker via NVDEC (GPU) och encoding
+via NVENC (GPU) - bara själva overlay-blandningen sker på CPU, eftersom
+ffmpegs overlay_cuda-filter saknar 10-bit-stöd. Avkodning är deterministisk
+(samma pixeldata oavsett hårdvara), så detta påverkar inte bildkvaliteten -
+det flyttar bara det tyngsta beräkningssteget bort från CPU:n.
 
 Fungerar oavsett videons upplösning, bildhastighet eller bitdjup -
 skriptet läser dessa automatiskt ur filen via ffprobe och anpassar
@@ -94,6 +98,9 @@ def main() -> None:
                          help="NVENC-kvalitet, lägre = bättre (default: 15)")
     parser.add_argument("--preset", default="p7",
                          help="NVENC-preset p1 (snabbast) - p7 (bäst kvalitet, default)")
+    parser.add_argument("--cpu-decode", action="store_true",
+                         help="Avkoda med CPU istället för NVDEC (GPU). Långsammare, "
+                              "men kan vara bra att felsöka med om NVDEC strular.")
     args = parser.parse_args()
 
     if not args.video.exists():
@@ -138,24 +145,46 @@ def main() -> None:
             sys.exit(0)
 
     # Bygg filterkedjan så att källans bitdjup bevaras genom overlay-steget.
-    # 10-bit källa: tvinga yuv420p10le genom hela kedjan + main10-profil på encodern.
+    # Videon avkodas via NVDEC (GPU) om inte --cpu-decode angetts - "hwdownload"
+    # hämtar sedan ner frames till system-RAM i EXAKT samma pixelformat som
+    # CPU-overlay-filtret redan tog emot innan, så resten av kedjan är oförändrad.
+    # 10-bit källa: tvinga yuv420p10le genom kedjan + main10-profil på encodern.
     # 8-bit källa: enkel overlay, inget att bevara utöver källans egen kvalitet.
+    anvand_nvdec = not args.cpu_decode
+
     if tio_bit:
         print("[INFO] 10-bit källa upptäckt - bevarar bitdjup genom overlay-steget.")
+        bas_filter = "hwdownload,format=yuv420p10le" if anvand_nvdec else "format=yuv420p10le"
         filter_complex = (
-            f"[0:v]format=yuv420p10le[base];"
+            f"[0:v]{bas_filter}[base];"
             f"[1:v]format=yuva420p10le[ovl];"
             f"[base][ovl]overlay={args.x}:{args.y}:format=yuv420p10[out]"
         )
         extra_output_args = ["-profile:v", "main10", "-pix_fmt", "p010le"]
     else:
         print("[INFO] 8-bit källa upptäckt - standard overlay.")
-        filter_complex = f"[0:v][1:v]overlay={args.x}:{args.y}[out]"
+        bas_filter = "hwdownload,format=yuv420p" if anvand_nvdec else "null"
+        filter_complex = (
+            f"[0:v]{bas_filter}[base];"
+            f"[1:v]format=yuva420p[ovl];"
+            f"[base][ovl]overlay={args.x}:{args.y}[out]"
+        )
         extra_output_args = []
+
+    ingang_video = (
+        ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(args.video)]
+        if anvand_nvdec else
+        ["-i", str(args.video)]
+    )
+    if anvand_nvdec:
+        print("[INFO] Avkodar med NVDEC (GPU) - avlastar CPU:n. Ingen kvalitetspåverkan "
+              "(avkodning är deterministisk).")
+    else:
+        print("[INFO] Avkodar med CPU (--cpu-decode angiven).")
 
     cmd = [
         ffmpeg, "-hide_banner", "-y",
-        "-i", str(args.video),
+        *ingang_video,
         "-i", str(args.bild),
         "-filter_complex", filter_complex,
         "-map", "[out]",
