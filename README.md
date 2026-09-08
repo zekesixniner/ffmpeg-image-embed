@@ -110,12 +110,14 @@ python overlay_map.py <video> <bild> <x> <y> [--output OUTPUT] [--cq 15] [--pres
 | `--output` | Output-filnamn (default: `<video>_overlay.mp4`)                 |
 | `--cq`     | NVENC-kvalitet, lägre = bättre (default: 15)                    |
 | `--preset` | NVENC-preset p1 (snabbast) – p7 (bäst kvalitet, default)         |
+| `--opacity`| Bildens genomskinlighet i procent, 0-100 (default: 100)         |
 
 ### Exempel
 
 ```powershell
 python overlay_map.py GS010096.mp4 map.png 7080 1620
 python overlay_map.py GS010110.mp4 map.png 4500 2000 --output karta_klar.mp4 --cq 18
+python overlay_map.py GS010096.mp4 map.png 7080 1620 --opacity 60
 ```
 
 ## Hur bitdjupsbevarandet fungerar

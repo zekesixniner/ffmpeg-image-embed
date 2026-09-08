@@ -101,7 +101,15 @@ def main() -> None:
     parser.add_argument("--cpu-decode", action="store_true",
                          help="Avkoda med CPU istället för NVDEC (GPU). Långsammare, "
                               "men kan vara bra att felsöka med om NVDEC strular.")
+    parser.add_argument("--opacity", type=float, default=100.0,
+                         help="Bildens genomskinlighet i procent, 0-100 "
+                              "(default: 100 = helt synlig).")
     args = parser.parse_args()
+
+    if not 0.0 <= args.opacity <= 100.0:
+        print(f"[FEL] --opacity måste vara mellan 0 och 100 (fick {args.opacity}).")
+        sys.exit(1)
+    alfa = args.opacity / 100.0
 
     if not args.video.exists():
         print(f"[FEL] Hittar inte videofilen: {args.video}")
@@ -154,22 +162,29 @@ def main() -> None:
 
     if tio_bit:
         print("[INFO] 10-bit källa upptäckt - bevarar bitdjup genom overlay-steget.")
-        bas_filter = "hwdownload,format=yuv420p10le" if anvand_nvdec else "format=yuv420p10le"
+        # NVDEC lagrar 10-bit internt som p010le - hwdownload måste hämta i det
+        # formatet, sedan konverterar vi separat till yuv420p10le (ren layout-
+        # omstrukturering, ingen precisionsförlust).
+        bas_filter = "hwdownload,format=p010le,format=yuv420p10le" if anvand_nvdec else "format=yuv420p10le"
         filter_complex = (
             f"[0:v]{bas_filter}[base];"
-            f"[1:v]format=yuva420p10le[ovl];"
+            f"[1:v]format=yuva420p10le,colorchannelmixer=aa={alfa}[ovl];"
             f"[base][ovl]overlay={args.x}:{args.y}:format=yuv420p10[out]"
         )
         extra_output_args = ["-profile:v", "main10", "-pix_fmt", "p010le"]
     else:
         print("[INFO] 8-bit källa upptäckt - standard overlay.")
-        bas_filter = "hwdownload,format=yuv420p" if anvand_nvdec else "null"
+        # NVDEC lagrar 8-bit internt som nv12 - samma logik som ovan.
+        bas_filter = "hwdownload,format=nv12,format=yuv420p" if anvand_nvdec else "null"
         filter_complex = (
             f"[0:v]{bas_filter}[base];"
-            f"[1:v]format=yuva420p[ovl];"
+            f"[1:v]format=yuva420p,colorchannelmixer=aa={alfa}[ovl];"
             f"[base][ovl]overlay={args.x}:{args.y}[out]"
         )
         extra_output_args = []
+
+    if args.opacity != 100.0:
+        print(f"[INFO] Genomskinlighet: {args.opacity:.0f}% synlig.")
 
     ingang_video = (
         ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", str(args.video)]
