@@ -46,7 +46,8 @@ def probe_json(ffprobe: str, filepath: Path) -> dict:
     cmd = [
         ffprobe, "-v", "error",
         "-print_format", "json",
-        "-show_entries", "stream=index,codec_type,pix_fmt,width,height,r_frame_rate,duration",
+        "-show_entries", "stream=index,codec_type,pix_fmt,width,height,r_frame_rate,duration,"
+                         "color_range,color_space,color_transfer,color_primaries",
         "-show_entries", "format=duration",
         str(filepath),
     ]
@@ -68,6 +69,32 @@ def hitta_videostream(data: dict, filepath: Path) -> dict:
 def ar_10bit(pix_fmt: str) -> bool:
     """10-bit-pixelformat i ffmpeg innehåller '10le'/'10be' i namnet (t.ex. yuv420p10le)."""
     return "10le" in pix_fmt or "10be" in pix_fmt
+
+
+def fargtaggar(video_stream: dict) -> dict:
+    """Videons färgegenskaper (matris, överföring, primärfärger, range).
+
+    Utdata ska ALLTID få källvideons färgegenskaper - aldrig bildens. En PNG/JPG
+    är RGB (eller full range), och lämnas valet åt ffmpeg kan bildens egenskaper
+    följa med ut i filen: då märks en vanlig YUV-video som RGB ("gbr"), vilket
+    senare steg (t.ex. xfade_concat.py) inte kan ta emot. Saknas en uppgift i
+    källan används bt709 / tv, som gäller för HD-video och uppåt.
+    """
+    def hamta(nyckel: str, standard: str) -> str:
+        varde = video_stream.get(nyckel)
+        return standard if varde in (None, "", "unknown", "unspecified") else varde
+
+    matris = hamta("color_space", "bt709")
+    if matris in ("gbr", "rgb"):
+        # YUV-video märkt som RGB är alltid fel (troligen en tidigare overlay).
+        print("[VARNING] Videon är märkt som RGB (gbr) fast den är YUV - använder bt709.")
+        matris = "bt709"
+    return {
+        "matris": matris,
+        "trc": hamta("color_transfer", "bt709"),
+        "primarer": hamta("color_primaries", "bt709"),
+        "range": hamta("color_range", "tv"),
+    }
 
 
 def hamta_varaktighet(data: dict, video_stream: dict) -> float:
@@ -135,6 +162,7 @@ def main() -> None:
     pix_fmt = v.get("pix_fmt", "okänt")
     tio_bit = ar_10bit(pix_fmt)
     varaktighet = hamta_varaktighet(video_info, v)
+    farg = fargtaggar(v)
 
     print(f"[INFO] Läser bildinfo: {args.bild}")
     bild_info = probe_json(ffprobe, args.bild)
@@ -143,6 +171,7 @@ def main() -> None:
 
     print(f"\n  Video:  {bredd}x{hojd}, pixelformat={pix_fmt} "
           f"({'10-bit' if tio_bit else '8-bit'}), {varaktighet:.1f}s")
+    print(f"  Färg:   {farg['matris']}/{farg['trc']}/{farg['primarer']}, range={farg['range']}")
     print(f"  Bild:   {b_bredd}x{b_hojd} vid position ({args.x}, {args.y})\n")
 
     if args.x + b_bredd > bredd or args.y + b_hojd > hojd or args.x < 0 or args.y < 0:
@@ -160,6 +189,16 @@ def main() -> None:
     # 8-bit källa: enkel overlay, inget att bevara utöver källans egen kvalitet.
     anvand_nvdec = not args.cpu_decode
 
+    # Färg: bilden konverteras till YUV med VIDEONS matris och range (annars
+    # väljer ffmpeg själv, och kartans färger kan förskjutas), och resultatet
+    # märks uttryckligen med videons färgegenskaper både i filtret (setparams)
+    # och till kodaren - så att bildens RGB-egenskaper aldrig följer med ut.
+    bild_konv = f"scale=out_color_matrix={farg['matris']}:out_range={farg['range']}"
+    satt_farg = (f"setparams=colorspace={farg['matris']}:color_trc={farg['trc']}"
+                 f":color_primaries={farg['primarer']}:range={farg['range']}")
+    farg_args = ["-colorspace", farg["matris"], "-color_trc", farg["trc"],
+                 "-color_primaries", farg["primarer"], "-color_range", farg["range"]]
+
     if tio_bit:
         print("[INFO] 10-bit källa upptäckt - bevarar bitdjup genom overlay-steget.")
         # NVDEC lagrar 10-bit internt som p010le - hwdownload måste hämta i det
@@ -167,9 +206,9 @@ def main() -> None:
         # omstrukturering, ingen precisionsförlust).
         bas_filter = "hwdownload,format=p010le,format=yuv420p10le" if anvand_nvdec else "format=yuv420p10le"
         filter_complex = (
-            f"[0:v]{bas_filter}[base];"
-            f"[1:v]format=yuva420p10le,colorchannelmixer=aa={alfa}[ovl];"
-            f"[base][ovl]overlay={args.x}:{args.y}:format=yuv420p10[out]"
+            f"[0:v]{bas_filter},{satt_farg}[base];"
+            f"[1:v]{bild_konv},format=yuva420p10le,colorchannelmixer=aa={alfa}[ovl];"
+            f"[base][ovl]overlay={args.x}:{args.y}:format=yuv420p10,{satt_farg}[out]"
         )
         extra_output_args = ["-profile:v", "main10", "-pix_fmt", "p010le"]
     else:
@@ -177,9 +216,9 @@ def main() -> None:
         # NVDEC lagrar 8-bit internt som nv12 - samma logik som ovan.
         bas_filter = "hwdownload,format=nv12,format=yuv420p" if anvand_nvdec else "null"
         filter_complex = (
-            f"[0:v]{bas_filter}[base];"
-            f"[1:v]format=yuva420p,colorchannelmixer=aa={alfa}[ovl];"
-            f"[base][ovl]overlay={args.x}:{args.y}[out]"
+            f"[0:v]{bas_filter},{satt_farg}[base];"
+            f"[1:v]{bild_konv},format=yuva420p,colorchannelmixer=aa={alfa}[ovl];"
+            f"[base][ovl]overlay={args.x}:{args.y},{satt_farg}[out]"
         )
         extra_output_args = []
 
@@ -211,6 +250,7 @@ def main() -> None:
         "-cq", str(args.cq),
         "-b:v", "0",
         *extra_output_args,
+        *farg_args,
         "-c:a", "copy",
         str(output),
     ]

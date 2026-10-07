@@ -17,6 +17,9 @@ H.264/H.265-video som helst.
 - Upptäcker om källan är 8-bit eller 10-bit och bygger rätt ffmpeg-filterkedja
   därefter, så bitdjupet bevaras genom overlay-steget istället för att tystas
   ner till 8-bit i onödan
+- Behåller videons färgegenskaper (färgmatris, range, överföring, primärfärger)
+  och konverterar bilden med samma matris, så att kartans färger blir rätt och
+  utdata aldrig blir felmärkt som RGB (se nedan)
 - Varnar om bildens position skulle hamna helt eller delvis utanför videoramen
 - Avkodar via NVDEC (GPU) och kodar via `hevc_nvenc` (GPU), `-cq 15`
   (visuellt lossless) som standard — bara overlay-blandningen sker på CPU
@@ -162,6 +165,25 @@ de NVDEC-avkodade frames till system-RAM i exakt samma pixelformat
 så resten av kedjan är oförändrad — bara CPU-belastningen minskar
 kraftigt, vilket är särskilt märkbart på 8K 10-bit-material där
 mjukvaruavkodning annars är den tyngsta delen av hela pipelinen.
+
+## Hur färgerna bevaras
+
+En PNG eller JPG är RGB (eller full range), videon är YUV. Lämnas valet åt
+ffmpeg kan bildens färgegenskaper följa med ut i den färdiga filen. Då visar
+`ffprobe` något i stil med `yuv420p(pc, gbr/bt709/bt709)`: en vanlig YUV-video
+märkt med RGB-matrisen (`gbr`). Senare steg som kodar om filen (t.ex.
+`xfade_concat.py`) stoppar på den märkningen, och kartan kan få fel nyanser om
+ffmpeg dessutom konverterar den med fel matris (bt601 i stället för bt709).
+
+Skriptet läser därför videons färgegenskaper med `ffprobe` och
+
+- konverterar bilden till YUV med videons matris och range
+  (`scale=out_color_matrix=…:out_range=…`),
+- märker resultatet med videons egenskaper både i filtret (`setparams`) och
+  till kodaren (`-colorspace`, `-color_trc`, `-color_primaries`, `-color_range`).
+
+Saknar källan en uppgift används bt709 / tv, som gäller för HD-video och uppåt.
+Är källan redan felmärkt som RGB skrivs en varning ut och utdata får bt709.
 
 ## Licens
 
